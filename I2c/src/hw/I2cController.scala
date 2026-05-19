@@ -30,6 +30,24 @@ case class I2cController(
   val byteCtrl = I2cByteController(cfg)
   byteCtrl.io.bus <> io.bus
 
+  // ----- FIFOs --------------------------------------------------
+  //
+  // TX and RX are separate StreamFifos sized by cfg.{tx,rx}FifoDepth.
+  // Same shape as UartController: Stream-shaped cores slot in with
+  // no handshake gymnastics, and the asymmetry (TX-heavy bursts vs
+  // RX-heavy reads) is sized at synth time.
+  //
+  // TX FIFO carries every on-wire payload byte (address byte for
+  // AddrWrite/AddrRead, address+R/W byte for RepStart, each
+  // WriteData byte) -- see the CMD doc-comment and TODO.md design
+  // notes for the split-vs-inline-byte rationale.
+  //
+  // RX FIFO is pushed by the cmd-issue FSM further down (on a
+  // successful ReadData rsp, gated by ctrlRxEnable) and popped via
+  // RXDATA reads.
+  val txFifo = StreamFifo(Bits(8 bits), cfg.txFifoDepth)
+  val rxFifo = StreamFifo(Bits(8 bits), cfg.rxFifoDepth)
+
   // ----- regif --------------------------------------------------
   val busif = Apb3BusInterface(io.apb, (0x00, 256 Byte))
 
@@ -89,10 +107,9 @@ case class I2cController(
   val statusArbLost =
     STATUS.field(Bool(), RO, 0, doc = "Arbitration loss (W1C copy in ISR).")
 
-  // TODO: drive these from byteCtrl / cmd-issue FSM in the wiring pass.
-  statusBusBusy := False
-  statusCmdBusy := False
-  statusArbLost := False
+  // statusBusBusy / statusCmdBusy / statusArbLost are driven from
+  // the cmd-issue FSM further down (the source signals don't exist
+  // until txFifo/rxFifo/cmd-shadow are wired in).
 
   // 0x0c ISR --------------------------------------------------
   val ISR = busif.newReg(doc = "Interrupt Status Register")
@@ -139,8 +156,12 @@ case class I2cController(
     inFlightKind === ByteCmdKind.AddrRead ||
     inFlightKind === ByteCmdKind.RepStart
 
-  def inDataPhase = inFlighKind === ByteCmdKind.WriteData
+  def inDataPhase = inFlightKind === ByteCmdKind.WriteData
 
+  // ackIn polarity from I2cByteController.ByteRsp: False = ACK
+  // (target accepted), True = NAK (target refused). Per-phase
+  // routing splits NAK-during-address from NAK-during-data so
+  // firmware can recover differently (re-address vs retry payload).
   when(
     byteCtrl.io.rsp.fire && byteCtrl.io.rsp.payload.status === ByteRspStatus.Ok
   ) {
@@ -156,9 +177,12 @@ case class I2cController(
   when(byteCtrl.io.rsp.fire) {
     isrCmdDone.set()
   }
-  
-  // TODO (wiring pass): cmd_overrun (need cmd-issue FSM), rx_done
-  // (needs RX FIFO), tx_underrun (needs cmd-issue FSM + TX FIFO).
+  // rx_done mirrors UartController: fire on a successful FIFO push.
+  // The push itself is gated in the cmd-issue block below (only
+  // ReadData rsps with Ok status push, and only when ctrlRxEnable
+  // is set), so this fires exactly when a real byte landed.
+  when(rxFifo.io.push.fire) { isrRxDone.set() }
+
 
   // 0x10 IER --------------------------------------------------
   // Mirrors the ISR layout bit-for-bit so firmware can mask events
@@ -238,21 +262,29 @@ case class I2cController(
     doc =
       "Front byte of the RX FIFO. Reading this register pops the FIFO; reads while RX_FIFO_STATUS.empty = 1 return zero."
   )
-  // TODO: drive from rxFifo.io.pop.payload in the wiring pass.
-  rxDataWord := B(0, 8 bits)
+  rxDataWord := rxFifo.io.pop.payload
 
   // 0x20 PRESCALE --------------------------------------------------
   // Runtime override of BusTiming. Reset value = cfg.quarterPeriodCycles
   // so a bare reset reproduces the build-time-configured SCL frequency.
   // Firmware can re-tune SCL after the fact by writing this register
   // (the same role BAUD plays for the UART).
+  //
+  // *** DECORATIVE TODAY *** — I2cBitController currently consumes
+  // cfg.quarterPeriodCycles at elaboration time and exposes no
+  // runtime input, so writes to this register change the stored
+  // value but do NOT re-tune SCL. The register stays in the map so
+  // the address layout matches the Step-6 contract; making it take
+  // effect needs I2cBitController.io.prescale + a hardware
+  // BusTiming-equivalent + plumbing through I2cByteController. See
+  // I2c/TODO.md Step 6 design notes.
   val PRESCALE = busif.newReg(doc = "Quarter-period cycle count for BusTiming")
   val prescale = PRESCALE.field(
     UInt(16 bits),
     RW,
     BigInt(cfg.quarterPeriodCycles),
     doc =
-      "Quarter-period in system-clock cycles. Reset = cfg.quarterPeriodCycles. Downstream timing scales proportionally."
+      "Quarter-period in system-clock cycles. Reset = cfg.quarterPeriodCycles. Decorative in v0.1 — wiring through to BusTiming is a follow-on."
   )
 
   // 0x24 TX_FIFO_STATUS --------------------------------------------------
@@ -284,10 +316,9 @@ case class I2cController(
     RO,
     doc = "Synth-time TX FIFO capacity in bytes (= cfg.txFifoDepth)."
   )
-  // TODO: drive full/empty/count from txFifo in the wiring pass.
-  txFifoFull := False
-  txFifoEmpty := True
-  txFifoCount := U(0, 8 bits)
+  txFifoFull := !txFifo.io.push.ready
+  txFifoEmpty := !txFifo.io.pop.valid
+  txFifoCount := txFifo.io.occupancy.resize(8 bits)
   txFifoDepth := U(cfg.txFifoDepth, 8 bits)
 
   // 0x28 RX_FIFO_STATUS --------------------------------------------------
@@ -314,10 +345,9 @@ case class I2cController(
     RO,
     doc = "Synth-time RX FIFO capacity in bytes (= cfg.rxFifoDepth)."
   )
-  // TODO: drive full/empty/count from rxFifo in the wiring pass.
-  rxFifoFull := False
-  rxFifoEmpty := True
-  rxFifoCount := U(0, 8 bits)
+  rxFifoFull := !rxFifo.io.push.ready
+  rxFifoEmpty := !rxFifo.io.pop.valid
+  rxFifoCount := rxFifo.io.occupancy.resize(8 bits)
   rxFifoDepth := U(cfg.rxFifoDepth, 8 bits)
 
   // 0x2C CFG_INFO --------------------------------------------------
@@ -368,26 +398,207 @@ case class I2cController(
   cfgInfoUseStretch := Bool(cfg.useClockStretching)
   cfgInfoClkFreqMhz := U(cfg.clkFreqHz / 1000000, 8 bits)
 
-  // ----- byteCtrl / IRQ tie-offs (boilerplate; wiring lands later) -------
+  // ----- TXDATA push glue -------------------------------------------------
   //
-  // The byte-controller is instantiated above and shares the bus port
-  // with us, but the cmd/rsp streams have no producer/consumer yet.
-  // Tie them off so elaboration succeeds; the cmd-issue FSM and
-  // response-handling glue land in the wiring pass.
-  byteCtrl.io.cmd.valid := False
-  byteCtrl.io.cmd.payload.kind := ByteCmdKind.Stop
-  byteCtrl.io.cmd.payload.data := B(0, 8 bits)
-  byteCtrl.io.cmd.payload.ackOut := True
+  // Plain WO field in the register file (so it shows up in the
+  // datasheet) but the *effect* is hand-rolled: any write that hits
+  // TXDATA's address pulses txFifo.io.push.valid for one cycle.
+  // Same pattern as UartController. The byte comes off
+  // busif.writeData rather than the stored field value because the
+  // field updates one cycle late.
+  val txDataWriteHit =
+    busif.doWrite && (busif.writeAddress() === U(
+      TXDATA.getAddr(),
+      busif.writeAddress().getWidth bits
+    ))
+  txFifo.io.push.valid := txDataWriteHit
+  txFifo.io.push.payload := busif.writeData(7 downto 0)
+
+  // ----- RXDATA pop glue --------------------------------------------------
+  //
+  // RXDATA reads pop one byte from the RX FIFO. Reads while empty
+  // return zero (rxFifo.io.pop.payload is X-but-Spinal-models-as-0
+  // when valid=0). The pop only fires when there's actually a byte
+  // staged so we don't deassert pop.valid spuriously.
+  val rxDataReadHit =
+    busif.doRead && (busif.readAddress() === U(
+      RXDATA.getAddr(),
+      busif.readAddress().getWidth bits
+    ))
+  rxFifo.io.pop.ready := rxDataReadHit && rxFifo.io.pop.valid
+
+  // ----- CMD shadow + cmd-issue FSM --------------------------------------
+  //
+  // CMD is a 1-deep shadow register, NOT a FIFO. Firmware polls
+  // STATUS.cmd_busy (or waits for ISR.cmd_done) between writes.
+  // Writes while cmd_busy = 1 are silently dropped and
+  // ISR.cmd_overrun is set. See TODO.md design notes for the
+  // why-not-a-FIFO rationale.
+  //
+  // Two flags pin down the "is the controller busy?" question
+  // unambiguously:
+  //   - cmdShadowValid : a freshly-latched CMD is waiting to be
+  //                      handed to byteCtrl (still in the shadow).
+  //   - cmdInFlight    : byteCtrl has accepted the CMD and is
+  //                      working on it; we're waiting for the rsp.
+  // STATUS.cmd_busy = OR of these. Firmware's "the CMD has
+  // retired" gate is cmd_busy falling, which only happens on
+  // rsp.fire or on the underrun-drop path.
+  val cmdShadowValid = Reg(Bool()) init (False)
+  val cmdInFlight = Reg(Bool()) init (False)
+  val cmdKindReg = Reg(ByteCmdKind()) init (ByteCmdKind.Stop)
+  val cmdAckOutReg = Reg(Bool()) init (True)
+  val cmdBusy = cmdShadowValid || cmdInFlight
+
+  // CMD address-hit. Decode the kind off busif.writeData on the
+  // hit cycle (the stored field value updates one cycle late).
+  val cmdWriteHit =
+    busif.doWrite && (busif.writeAddress() === U(
+      CMD.getAddr(),
+      busif.writeAddress().getWidth bits
+    ))
+  val cmdWriteKind = busif.writeData(2 downto 0).asUInt
+  val cmdWriteAckOut = busif.writeData(3)
+
+  when(cmdWriteHit) {
+    when(cmdBusy) {
+      // Overrun: drop the write, latch the sticky bit. The byte-ctrl
+      // sees nothing.
+      isrCmdOverrun.set()
+    } otherwise {
+      // Latch into the shadow. The cmd-issue path below decides
+      // when to actually drive byteCtrl.io.cmd.
+      cmdShadowValid := True
+      switch(cmdWriteKind) {
+        is(0) { cmdKindReg := ByteCmdKind.AddrWrite }
+        is(1) { cmdKindReg := ByteCmdKind.AddrRead }
+        is(2) { cmdKindReg := ByteCmdKind.WriteData }
+        is(3) { cmdKindReg := ByteCmdKind.ReadData }
+        is(4) { cmdKindReg := ByteCmdKind.RepStart }
+        is(5) { cmdKindReg := ByteCmdKind.Stop }
+        // 6/7 reserved: treat as Stop so a bogus opcode degrades to
+        // "release the bus" rather than something random.
+        default { cmdKindReg := ByteCmdKind.Stop }
+      }
+      cmdAckOutReg := cmdWriteAckOut
+    }
+  }
+
+  // Per the CMD doc-comment / TODO.md split-vs-inline rationale:
+  // AddrWrite, AddrRead, RepStart, WriteData each consume one
+  // TXDATA byte on issue. ReadData and Stop do not.
+  val cmdNeedsPayload =
+    cmdKindReg === ByteCmdKind.AddrWrite ||
+      cmdKindReg === ByteCmdKind.AddrRead ||
+      cmdKindReg === ByteCmdKind.WriteData ||
+      cmdKindReg === ByteCmdKind.RepStart
+
+  // ReadData gates on RX FIFO space only when ctrlRxEnable is
+  // set — see TODO.md "Why no rx_overrun": full FIFO leaves the
+  // CMD parked in the shadow (no error bit, SCL stays idle, no
+  // byte ever lost). When ctrlRxEnable=0, bytes are dropped per
+  // spec and the gate disappears.
+  val cmdNeedsRxSpace =
+    cmdKindReg === ByteCmdKind.ReadData && ctrlRxEnable
+  val payloadAvail = txFifo.io.pop.valid
+  val rxSpaceAvail = rxFifo.io.push.ready
+
+  // The drive into byteCtrl. ctrlEnable freezes the whole pipeline
+  // (mirrors UartController's CTRL.enable). ctrlCmdEnable gates
+  // only the cmd-issue path so firmware can drain or pause without
+  // killing the rest of the controller.
+  val issueGate = ctrlEnable && ctrlCmdEnable && cmdShadowValid
+
+  // Underrun: a payload-needing CMD landed in the shadow but TXDATA
+  // is empty. Drop the CMD (clear the shadow), latch the sticky
+  // bit, and do NOT poke byteCtrl. Symmetric with cmd_overrun.
+  val underrunDrop = issueGate && cmdNeedsPayload && !payloadAvail
+  when(underrunDrop) {
+    isrTxUnderrun.set()
+    cmdShadowValid := False
+  }
+
+  // Normal issue path: present the CMD to byteCtrl when the shadow
+  // is loaded, payload (if needed) is staged, and RX has space (if
+  // needed). Anything that fails one of these stays parked.
+  val canIssue =
+    issueGate &&
+      !underrunDrop &&
+      (!cmdNeedsPayload || payloadAvail) &&
+      (!cmdNeedsRxSpace || rxSpaceAvail)
+
+  byteCtrl.io.cmd.valid := canIssue
+  byteCtrl.io.cmd.payload.kind := cmdKindReg
+  byteCtrl.io.cmd.payload.ackOut := cmdAckOutReg
+  // data field is don't-care for ReadData/Stop; for payload kinds
+  // we route TXDATA's front through. Driving it unconditionally
+  // means no Mux on the byte-ctrl side and no warning from Spinal.
+  byteCtrl.io.cmd.payload.data := txFifo.io.pop.payload
+
+  // Pop one TXDATA byte exactly when the byte-ctrl accepts a
+  // payload-needing CMD. The pop is one-cycle (cmd.fire is a pulse).
+  txFifo.io.pop.ready := byteCtrl.io.cmd.fire && cmdNeedsPayload
+
+  // Shadow → in-flight transition.
+  when(byteCtrl.io.cmd.fire) {
+    cmdShadowValid := False
+    cmdInFlight := True
+  }
+
+  // ----- response handling ----------------------------------------------
+  //
+  // We never backpressure rsps (no reason to — they're single-beat
+  // and we consume them combinationally). rsp.fire is therefore the
+  // same as rsp.valid, but the Stream contract still wants ready
+  // asserted so we don't gum up the bit-controller.
   byteCtrl.io.rsp.ready := True
 
-  // IRQ aggregation matches the Uart pattern: OR(ISR & IER) gated by
-  // the master enable. Stays low until the ISR .set() triggers wire
-  // up — the expression is in place so the address map / IRQ contract
-  // are observable from sim today.
+  // RX FIFO push: a successful ReadData rsp lands here. Gated by
+  // ctrlRxEnable per spec: with rx_enable=0, received bytes are
+  // dropped on the floor (and the issue path above didn't gate on
+  // RX space, so the wire still ran). push.ready is guaranteed
+  // True here because the issue path gated ReadData on it before
+  // letting the CMD fire — see canIssue above.
+  rxFifo.io.push.valid :=
+    byteCtrl.io.rsp.fire &&
+      inFlightKind === ByteCmdKind.ReadData &&
+      byteCtrl.io.rsp.payload.status === ByteRspStatus.Ok &&
+      ctrlRxEnable
+  rxFifo.io.push.payload := byteCtrl.io.rsp.payload.data
+
+  // In-flight → idle transition.
+  when(byteCtrl.io.rsp.fire) {
+    cmdInFlight := False
+  }
+
+  // ----- STATUS bits -----------------------------------------------------
+  //
+  // cmd_busy: any unretired CMD, whether parked in the shadow or
+  // being processed by byteCtrl. Falls on rsp.fire (or underrun-drop).
+  // bus_busy: best functional proxy for "controller mid-transaction".
+  // The byte-controller doesn't expose a live "in a transaction"
+  // signal; cmdBusy is the closest faithful approximation given
+  // the 1-deep-shadow semantics.
+  // arb_lost_live: the spec asks for a live mirror of the arb-loss
+  // line. The byte-controller only publishes ArbLost via rsp.status
+  // (one-cycle), so the most useful thing we can expose here is a
+  // sticky mirror of ISR.arb_lost — firmware sees the same bit
+  // until it W1C-clears the ISR.
+  statusBusBusy := cmdBusy
+  statusCmdBusy := cmdBusy
+  statusArbLost := isrArbLost
+
+  // ----- IRQ aggregation -------------------------------------------------
+  //
+  // OR(ISR & IER) gated by the master enable. Mirrors UartController.
+  // isrStretchTimeout is tied to RO 0 today (reserved for future
+  // stretch-timeout support); the term is folded in for layout
+  // symmetry with ISR/IER and collapses away at synth.
   val irqRaw =
     (isrAddrNack & ierAddrNack) |
       (isrDataNack & ierDataNack) |
       (isrArbLost & ierArbLost) |
+      (isrStretchTimeout & ierStretchTimeout) |
       (isrCmdDone & ierCmdDone) |
       (isrCmdOverrun & ierCmdOverrun) |
       (isrRxDone & ierRxDone) |
