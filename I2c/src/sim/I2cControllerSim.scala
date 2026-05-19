@@ -108,6 +108,10 @@ object I2cControllerSim {
     // Third port released — no competitor master in these tests.
     bus.io.c.scl.write := True
     bus.io.c.sda.write := True
+
+    // Inner Component ports aren't simulator-visible by default; the
+    // testbench drives APB through `rig.dut.io.apb`, so surface it.
+    dut.io.apb.simPublic()
   }
 
   // ----- Helpers ----------------------------------------------------------

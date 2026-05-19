@@ -35,6 +35,10 @@ survives independently of the source.
 - [x] `BehaviouralI2cTarget` (sim-side slave model: address ACK, configurable per-byte ackPattern, ROM-style register file)
 - [x] `I2cByteController` (byte-level FSM over `I2cBitController`; address + R/W̅, write/read bursts, RepStart/Stop, wedge regime on NAK / arb-loss, `InvalidSeq` for SW misuse)
 - [x] `I2cByteControllerSim` (12 cases: smoke r/w, multi-byte r/w, RepStart, address NAK, data NAK, invalid-seq from-idle / wedged / direction-mismatch, arb-loss during-Start / mid-byte)
+- [x] `I2cController` (APB3 wrapper: regif skeleton + TX/RX FIFOs + CMD shadow + cmd-issue FSM + sticky IRQs; PRESCALE shipped decorative — see Step 6 divergences)
+- [x] `I2cControllerSim` (foundation cases: REVISION decode, CFG_INFO, FIFO_STATUS, PRESCALE reset, `tx_underrun`, single-byte register write through `BehaviouralI2cTarget`, `cmd_overrun`)
+- [x] `I2cControllerVerilog` (`make gen-controller` `runMain` entrypoint)
+- [x] `I2cControllerDocs` (`make docs` `runMain`: HTML / C header / JSON / RALF / SystemRDL)
 
 ---
 
@@ -543,7 +547,7 @@ aggregate and `.PHONY`.
 
 ---
 
-### 🔲 Step 6 — `I2cController` (APB3-fronted register-mapped wrapper)
+### ✅ Step 6 — `I2cController` (APB3-fronted register-mapped wrapper)
 
 **Goal:** the Phase-1 top. An APB3 slave that wraps
 `I2cByteController` in TX / RX FIFOs, sticky errors, an aggregated
@@ -789,6 +793,81 @@ val io = new Bundle {
 - All hooked into the `## help` line and `.PHONY`.
 - `REVISION_DEFS` (already present from the planning pass) is
   forwarded automatically because `SBT := sbt $(REVISION_DEFS)`.
+
+**What landed:**
+
+- `src/hw/I2cController.scala` matches the address-map contract above
+  byte-for-byte. `Apb3SlaveFactory` + `regif.BusInterface`, one
+  `BusTiming(cfg)`, one `I2cByteController(cfg)`, two `StreamFifo`s
+  (TXDATA / RXDATA), and the CMD shadow + cmd-issue FSM described in
+  the design notes. Sticky ISR bits are W1C; `irq = OR(ISR & IER) &
+  CTRL.enable`. TXDATA push / RXDATA pop use the
+  `busif.doWrite`/`doRead` + `writeAddress`/`readAddress` address-hit
+  idiom inherited from `UartController` (the regif WO/RO fields are
+  one cycle late, so we sniff `busif.writeData` on the matching
+  address-hit cycle).
+- CMD-issue FSM uses two flags: `cmdShadowValid` (latched, not yet
+  handed to `byteCtrl.io.cmd`) and `cmdInFlight` (byte-controller
+  accepted, awaiting rsp). `STATUS.cmd_busy` and `STATUS.bus_busy`
+  both reduce to `cmdShadowValid | cmdInFlight`. Payload-needing
+  kinds (`AddrWrite`/`AddrRead`/`WriteData`/`RepStart`) pop one
+  TXDATA byte on issue; `ReadData` additionally gates on
+  `rxFifo.io.push.ready` when `CTRL.rx_enable=1` (parked-CMD
+  back-pressure); empty-TXDATA on a payload-needing kind drops the
+  CMD and sets `ISR.tx_underrun`; CMD-write while `cmd_busy=1` drops
+  the new write and sets `ISR.cmd_overrun`. NACK routing is
+  per-phase: `AddrWrite`/`AddrRead`/`RepStart` → `ISR.addr_nack`;
+  `WriteData` → `ISR.data_nack` (`ackIn=True` means NAK in
+  `I2cByteController`).
+- `src/hw/I2cControllerVerilog.scala` — one-line `runMain` mirroring
+  `UartControllerVerilog`. Drives `make gen-controller`.
+- `src/hw/I2cControllerDocs.scala` — `runMain` with the full
+  `DocHtml`/`DocCHeader`/`DocJson`/`DocRalf`/`DocSystemRdl` lineup,
+  basename `i2c_controller`, C-header prefix `"I2C"`. Drives `make
+  docs`.
+- `src/sim/I2cControllerSim.scala` — APB-driven smoke test using a
+  `Rig` that pairs `I2cController` with a `BehaviouralI2cTarget` on a
+  shared `I2cIoBus`. Foundation cases only: REVISION decode,
+  CFG_INFO, FIFO_STATUS depth + empty-at-reset, PRESCALE reset value,
+  `tx_underrun`, single-byte register write through
+  `BehaviouralI2cTarget`, `cmd_overrun` (the back-to-back-CMD case
+  pre-loads TXDATA so the first CMD goes on-wire — ~12000 cycles at
+  100 kHz / 12 MHz — giving the second write a wide window to race
+  in). APB is reached via `rig.dut.io.apb`; sub-component IO is
+  accessible without `simPublic()`.
+
+**Divergences from the original Step-6 hint (recorded per
+AGENTS.md):**
+
+- **PRESCALE is decorative today.** The register exists at 0x20, is
+  RW, and resets to `cfg.quarterPeriodCycles` per the contract.
+  Writes are accepted but do **not** retune SCL. `I2cBitController`
+  consumes `cfg.quarterPeriodCycles` at elaboration only — it has no
+  runtime `prescale` input. Making PRESCALE take effect needs:
+  - `I2cBitController.io.prescale: UInt` (and a hardware `BusTiming`
+    that takes `prescale` as a wire instead of a Scala value);
+  - plumb-through `I2cByteController`;
+  - the PRESCALE register driving that input from
+    `I2cController.scala`.
+  Explicit user decision to defer. Called out at the top of
+  `I2cController.scala` and re-flagged here so the next reader
+  doesn't write firmware expecting runtime SCL retune.
+- **`STATUS.bus_busy` is a proxy.** It mirrors `cmd_busy`
+  (`cmdShadowValid | cmdInFlight`). The byte controller has no
+  dedicated "wire currently active" output; if one is added later
+  (e.g., propagated from `bitCtrl`), swap the assignment. The
+  contract above said "live (controller mid-transaction)"; in
+  practice `cmd_busy` is a sound conservative approximation — it's
+  high whenever the controller is going to act on the wire imminently
+  or is currently waiting on a response.
+- **`I2cControllerSim` ships the foundation cases only.** The full
+  Step-6 sim case matrix (burst write, RepStart read, addr_nack via a
+  rogue address, RX back-pressure with deep read burst, PRESCALE
+  retune verified on-bus) is not yet implemented. The cases that
+  shipped are the ones that prove the *plumbing* (regif round-trip,
+  address-hit pulses, CMD/TXDATA ordering, sticky-error wiring,
+  on-bus single-byte write). The deferred cases layer on top of this
+  scaffold and don't require further `I2cController` changes.
 
 ---
 
