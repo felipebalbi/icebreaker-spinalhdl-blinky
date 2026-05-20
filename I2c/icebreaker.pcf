@@ -18,3 +18,13 @@ set_io io_reset      10
 # Wire external 4.7 kΩ pull-ups from io_scl and io_sda to 3.3 V.
 set_io io_scl         4
 set_io io_sda         2
+
+# UART debug stream — TMP108 readings come out here as
+# `+NN.N\r\n`. Pin matches the Uart project's icebreaker.pcf so
+# the same iCEbreaker USB-UART (FT2232H channel B) carries the
+# stream. RX is intentionally not wired: the demo is one-way.
+#
+# Connect to the host's USB-UART RX. Picocom on /dev/ttyUSB1 at
+# 115200 8N1 lights up.
+set_io io_uRx         6
+set_io io_uTx         9

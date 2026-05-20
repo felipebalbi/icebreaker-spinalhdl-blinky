@@ -4,15 +4,17 @@ A from-scratch I²C **controller** and **target** in SpinalHDL, targeting
 the iCEbreaker. Both halves are built in the same project so they can
 be simulated against each other before either ever touches a real bus.
 
-Status: **Phase 1 complete — `I2cController` landed.** The APB3-fronted
-register-mapped wrapper (`I2cController`) is wired up — regif skeleton,
-TX/RX FIFOs, 1-deep CMD shadow with a cmd-issue FSM, sticky/W1C ISR
-with a masked-OR IRQ, and the runMain entrypoints for `make
-gen-controller` and `make docs`. `I2cControllerSim` ships the
-foundation cases (REVISION/CFG_INFO/FIFO_STATUS/PRESCALE-reset, CMD
-overrun, TX underrun, single-byte register write through
-`BehaviouralI2cTarget`); the remaining on-bus cases (burst, RepStart
-read, addr_nack, RX back-pressure, PRESCALE retune) layer on top.
+Status: **Phase 1 simulated; demo scaffolded, hardware bring-up
+pending.** `I2cController` (the APB3-fronted register-mapped
+wrapper) and its sim shipped in Step 6, and Step 7's bring-up
+demo (`I2cControllerDemo`) is now scaffolded — it instantiates
+`I2cController` and `uart.UartController` (pulled in via a
+cross-project sbt `ProjectRef` to `../Uart`) behind a tiny
+internal Apb3 fabric, walks the canonical TMP108 read sequence,
+decodes the 12-bit signed result, and streams `±NN.N\r\n` over
+USB-UART once per second. Real-silicon bring-up (`make all &&
+make flash`, then `picocom` to see the readings) is the open
+Phase-1 gate; see `TODO.md` Step 7 for the checklist.
 **Caveat:** the PRESCALE register is shipped *decorative* — it stores
 and reads back, but `I2cBitController` consumes
 `cfg.quarterPeriodCycles` at elaboration only, so writes do not retune

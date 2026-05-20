@@ -35,7 +35,12 @@ BIN  := $(GEN_DIR)/$(TOP).bin
 
 # Hardware sources only -- sim sources don't affect Verilog generation,
 # so excluding them prevents needless rebuilds when iterating on tests.
-HW_SRCS := $(shell find $(SRC_DIR)/hw -name '*.scala')
+#
+# The cross-project Uart sources are pulled in too (this project depends
+# on `uart` via ProjectRef in build.sbt; see I2c/AGENTS.md "Cross-project
+# deps") so an upstream UartController tweak invalidates gen/<TOP>.v.
+HW_SRCS := $(shell find $(SRC_DIR)/hw -name '*.scala') \
+           $(shell find ../Uart/src/hw -name '*.scala')
 
 # Default target
 .DEFAULT_GOAL := all
@@ -95,6 +100,9 @@ sim-controller: ## Run I2cController APB-driven simulation (lands with Step 6)
 gen-controller: | $(GEN_DIR) ## Generate I2cController.v in gen/ (lands with Step 6)
 	$(SBT) -batch "runMain $(PACKAGE).I2cControllerVerilog"
 
+gen-demo: | $(GEN_DIR) ## Generate I2cControllerDemo.v in gen/ (Step 7 demo top)
+	$(SBT) -batch "runMain $(PACKAGE).I2cControllerDemoVerilog"
+
 docs: | $(GEN_DIR) ## Generate IP datasheet (HTML / C / JSON / RALF / RDL) in gen/ (lands with Step 6)
 	$(SBT) -batch "runMain $(PACKAGE).I2cControllerDocs"
 
@@ -122,4 +130,4 @@ help: ## Show this help (every target with a ## description)
 		/^[a-zA-Z0-9_.-]+:.*## / { printf "  \033[36m%-12s\033[0m %s\n", $$1, $$2 }' \
 		$(MAKEFILE_LIST)
 
-.PHONY: all sim sim-i2cio sim-bustiming sim-bitctrl sim-bytectrl sim-controller gen-controller docs waves flash clean distclean help
+.PHONY: all sim sim-i2cio sim-bustiming sim-bitctrl sim-bytectrl sim-controller gen-controller gen-demo docs waves flash clean distclean help

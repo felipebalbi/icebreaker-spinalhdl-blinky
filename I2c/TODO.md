@@ -39,6 +39,8 @@ survives independently of the source.
 - [x] `I2cControllerSim` (foundation cases: REVISION decode, CFG_INFO, FIFO_STATUS, PRESCALE reset, `tx_underrun`, single-byte register write through `BehaviouralI2cTarget`, `cmd_overrun`)
 - [x] `I2cControllerVerilog` (`make gen-controller` `runMain` entrypoint)
 - [x] `I2cControllerDocs` (`make docs` `runMain`: HTML / C header / JSON / RALF / SystemRDL)
+- [x] `I2cControllerDemo` (TMP108 → APB3 fabric → `uart.UartController` → `+NN.N\r\n` over USB-UART; pulls `Uart` in via `ProjectRef`, replaces the "copy TX" plan)
+- [x] `I2cControllerDemoVerilog` (`make gen-demo` / default `make all` `runMain` entrypoint)
 
 ---
 
@@ -871,70 +873,105 @@ AGENTS.md):**
 
 ---
 
-### 🔲 Step 7 — Controller bring-up demo
+### ✅ Step 7 — Controller bring-up demo
 
-**Goal:** prove the full controller stack works on real silicon
-by reading a known-quantity sensor and dumping its register data
-over UART so we can eyeball it on a desktop terminal — same
-"`Hello, World`" gating gesture the Uart project used.
+**What landed.** `I2cControllerDemo` reads a TMP108 temperature
+sensor on PMOD1A I²C and streams `±NN.N\r\n` ASCII to the host's
+USB-UART once per second.
 
-**File:** `src/hw/I2cControllerDemo.scala` plus
-`src/hw/I2cControllerDemoVerilog.scala` for the elaboration
-entrypoint.
+**Files:**
+- `src/hw/I2cControllerDemo.scala` — demo top. Owns an internal
+  Apb3 fabric (`Apb3Decoder`) with two slaves at `0x000`
+  (`I2cController`) and `0x100` (`uart.UartController`), a tiny
+  one-transaction-at-a-time APB master driver, and a single
+  `StateMachine` ROM-CPU FSM that walks the canonical TMP108
+  read sequence (Start → 0x90 → 0x00 → RepStart → 0x91 →
+  byte_hi[ACK] → byte_lo[NACK] → Stop), decodes the 12-bit
+  signed result, and pushes seven ASCII bytes through the UART
+  with `TX_FIFO_STATUS.full` back-pressure.
+- `src/hw/I2cControllerDemoVerilog.scala` — `runMain` entrypoint
+  for `make gen-demo` and the default `make all` flow.
 
-**Suggested IO (top-level pins):**
+**Divergences from the original Step 7 hint:**
+
+1. **`UartController` via cross-project sbt dep, not copy.** The
+   hint said "Copy the minimal TX path … No external `Uart`
+   project dependency. Keeps the I2c project buildable with
+   `sbt` in isolation." We instead pull `Uart` in via
+   `ProjectRef(file("../Uart"), "uart")` in `I2c/build.sbt` and
+   instantiate `uart.UartController` directly. The full
+   APB-fronted `UartController` (TX FIFO, BAUD, ISR) drops
+   straight into the demo's fabric, no glue logic. Updated all
+   three AGENTS.md (root, `Uart/`, `I2c/`) so the convention
+   matches the code: cross-project deps are now permitted for
+   shared debug/IO IPs (today: `Uart`). `Makefile`'s `HW_SRCS`
+   was extended to glob `../Uart/src/hw/*.scala` so an upstream
+   Uart edit invalidates `gen/I2cControllerDemo.v`.
+2. **TMP108, not MCP9808.** The hint suggested MCP9808 ("tiny
+   driver footprint"); TMP108 has the same one-register-read
+   shape and is what we actually had in hand. Address 0x48,
+   register 0x00, 16-bit MSB-first, upper 12 bits two's
+   complement at 0.0625 °C/LSB.
+3. **No on-bus end-to-end sim.** The Step-7 hint flagged this as
+   "nice-to-have but not required to ship", and gating Phase-1
+   closeout on real-hardware bring-up matches the
+   `I2c/AGENTS.md` "Hardware bring-up gating" rule. The
+   existing `I2cControllerSim` already covers the
+   APB→FSM→`BehaviouralI2cTarget` path against a sim-side
+   register file, so a second sim layer for the demo wouldn't
+   add coverage.
+4. **Polling, no IRQs.** The IRQ outputs of both controllers are
+   left dangling. The demo polls `STATUS.cmd_busy` between I²C
+   commands and `TX_FIFO_STATUS.full` between UART pushes.
+   `I2cControllerSim` already exercises the IRQ path in
+   simulation.
+
+**Top-level pins (see `icebreaker.pcf`):**
 ```
-clk_12      -> input
-rst_n       -> input (active-low button)
-i2c_scl     -> inout  (PMOD1A pin 1)
-i2c_sda     -> inout  (PMOD1A pin 2)
-uart_tx     -> output (USB-UART TXD on the iCEbreaker)
+io_clk    (FPGA pin 35) — 12 MHz
+io_reset  (FPGA pin 10) — active-low user button
+io_scl    (FPGA pin  4) — PMOD1A.1, external 4.7 kΩ pull-up to 3.3 V
+io_sda    (FPGA pin  2) — PMOD1A.2, external 4.7 kΩ pull-up to 3.3 V
+io_uTx    (FPGA pin  9) — USB-UART RX (matches the Uart project's pin)
 ```
+RX/CTS/RTS are intentionally not wired; the demo is one-way TX.
 
-**Design notes:**
-- **APB master FSM in the demo.** The controller now exposes
-  Apb3, not a Stream — so the demo owns a small APB master FSM
-  that walks the register file (write CTRL.enable, write CMD,
-  poll STATUS.cmd_busy, ...) the way `UartEchoDemo` does. Reuse
-  that FSM shape; it's already proven.
-- **Pick one target part.** Recommend MCP9808 (temperature
-  sensor) over SSD1306: MCP9808 has a tiny driver footprint
-  (one register read returns the temperature), SSD1306 needs an
-  init blob and DC-DC startup delays. Document the choice in
-  this block's header comment.
-- **No external `Uart` project dependency.** Copy the minimal TX
-  path (`BaudGenerator`, `TxShiftReg`, `TxFsm`, `UartTx`) into
-  the `i2c` package as `LocalUartTx*` — or, cleaner, factor the
-  TX out into a shared `common` package later. For Step 7,
-  inline-copy with an "imported from Uart project, sync forward
-  if Uart changes" comment header. Keeps the I2c project
-  buildable with `sbt` in isolation.
-- **Driver shape.** A small ROM of `(addr, data, kind)` triples
-  feeds the APB master FSM; bytes read from `RXDATA` go to a
-  byte-to-hex-ASCII converter and out the local UART. Reuse the
-  Uart project's "drain a ROM through a Stream" pattern.
-- **Reset:** debounced active-low button; after reset, kick off
-  one MCP9808 read every ~500 ms (a counter reset, not a fancy
-  RTC).
+**Reset & clock domain.** `I2cControllerDemo` builds an explicit
+`ClockDomain(clock = io.clk, reset = io.reset, config =
+ClockDomainConfig(RISING / ASYNC / LOW))` and wraps the entire
+design in a `ClockingArea(mainClockDomain)`. Same idiom as
+`Uart/UartTxDemo` and `UartEchoDemo` — without it the iCE40
+`reset` pin would be unconnected and the user button would do
+nothing.
 
-**Sim hints:**
-- No new SpinalSim — this is hardware bring-up. Optional
-  end-to-end sim that wires `BehaviouralTargetMock(0x18,
-  registers = Map(0x05 -> 0x0123))` to the controller and
-  scrapes the UART output for "T=0x0123" is nice-to-have but
-  not required to ship.
+**I²C inout pad bridge.** `master(I2cIo())` would have produced
+four flat top ports (`io_i2c_scl_read` / `_write` + the SDA
+pair), which nextpnr can't merge back into one bidirectional pad
+via PCF alone. Instead the demo declares two `inout(Analog(Bool()))`
+pads at the top — `io.scl`, `io.sda` — and bridges them by hand
+inside the `ClockingArea`:
+```
+when(!i2cCtrl.io.bus.scl.write) { io.scl := False }
+i2cCtrl.io.bus.scl.read := io.scl
+```
+(plus the SDA pair). `synth_ice40` infers an `SB_IO` open-drain
+primitive from this pattern. The `I2cIo` bundle itself stays
+unchanged everywhere else (controller, sub-modules, sims).
 
-**Makefile:** add `TOP := I2cControllerDemo` once this step
-lands (the placeholder is already there); the bitstream then
-flows through `make` / `make flash` like the Uart demo did.
-No new sim target.
+**Makefile:** `gen-demo` target (`runMain
+i2c.I2cControllerDemoVerilog`) added; `TOP := I2cControllerDemo`
+was already pinned in `Step 6`'s pre-wiring, so `make all` just
+works. `HW_SRCS` extended to include `../Uart/src/hw/*.scala`.
 
-**Hardware bring-up checklist** (mirror the Uart Step 5b style):
+**Sim:** none — by design. Hardware bring-up is the Phase-1 gate.
+
+**Hardware bring-up checklist (open):**
 - [ ] Bitstream builds clean.
-- [ ] On scope/LA: SCL toggles at the configured `busFreqHz`.
-- [ ] Address phase ACKs at `0x18`.
-- [ ] Temperature register read returns plausible data.
-- [ ] UART output decodes on `picocom`.
+- [ ] On scope/LA: SCL toggles at 100 kHz.
+- [ ] Address phase ACKs at 0x48 (TMP108).
+- [ ] `picocom -b 115200 /dev/ttyUSB1` shows `+NN.N\r\n` once
+      per second matching room temperature.
+- [ ] 🎉 Phase 1 closed.
 
 ---
 

@@ -10,7 +10,7 @@ val spinalIdslPlugin = compilerPlugin(
   "com.github.spinalhdl" %% "spinalhdl-idsl-plugin" % spinalVersion
 )
 
-lazy val projectname = (project in file("."))
+lazy val uart = (project in file("."))
   .settings(
     name := "uart",
     Compile / scalaSource := baseDirectory.value / "src",

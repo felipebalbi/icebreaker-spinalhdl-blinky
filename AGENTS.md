@@ -16,9 +16,31 @@ Blinky/  Button/  ButtonDebouncer/  Pwm/  PwmFade/  Uart/  I2c/
 
 Every project owns its own `Makefile`, `build.sbt`,
 `icebreaker.pcf`, `src/{hw,sim}/` tree, `README.md`, and
-`TODO.md`. Cross-project dependencies are avoided — when one
-project needs functionality from another, the minimum needed is
-copied locally rather than introducing an import path.
+`TODO.md`.
+
+## Cross-project dependencies
+
+Cross-project sbt dependencies are permitted **only** for shared
+debug/IO IPs that are themselves stable, hardware-validated tops.
+Today that list is:
+
+- **`Uart`** — `UartController` is the canonical debug-output IP.
+  Downstream projects depend on it via
+  `ProjectRef(file("../Uart"), "uart")` and instantiate
+  `uart.UartController` directly rather than copying
+  `BaudGenerator` / `UartTx`.
+
+For any other cross-project reuse — and for *all* working IP code
+(`Blinky`, `Pwm`, …) — copy the minimum needed locally rather
+than introducing an import path. This keeps each example
+self-contained unless a sibling is acting as a deliberate, frozen
+library.
+
+The consumer's `<Project>/AGENTS.md` documents the dep direction
+under a `## Cross-project deps` section, and the consumer's
+`Makefile` extends `HW_SRCS` to include the producer's
+`src/hw/*.scala` so upstream edits invalidate the generated
+Verilog.
 
 ## Source layout (per project)
 
@@ -96,7 +118,9 @@ inconsistencies between code, build, sim, and docs.
 - Don't create planning `.md` files inside the repo. Use the
   per-session workspace (`~/.copilot/session-state/<id>/`) for
   ephemeral plans.
-- Don't introduce cross-project sbt dependencies. Copy the
-  minimum needed code locally and note its origin in a header
-  comment.
+- Don't introduce cross-project sbt dependencies *except* for
+  shared debug/IO IPs whitelisted in the "Cross-project
+  dependencies" section above (today: `Uart`). For everything
+  else, copy the minimum needed code locally and note its origin
+  in a header comment.
 - Don't drive any open-drain bus high (see `I2c/AGENTS.md`).

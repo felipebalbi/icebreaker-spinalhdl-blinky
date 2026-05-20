@@ -224,6 +224,38 @@ When closing a step:
    - **Makefile** — the new `sim-<name>` target name.
 3. Bump `README.md`'s status line if visible state changed.
 
+## Cross-project deps
+
+This project depends on **`Uart`** for debug-stream output via
+`ProjectRef(file("../Uart"), "uart")` in `build.sbt`. It is
+currently the project's only cross-project sbt dep, and is the
+mechanism by which `I2cControllerDemo` (Step 7) pushes
+TMP108-decoded ASCII over USB-UART without re-implementing a
+UART core locally.
+
+Practical implications:
+
+- `import uart.{UartController, UartConfig}` is allowed (and
+  required) inside `src/hw/I2cControllerDemo.scala` and
+  `src/hw/I2cControllerDemoVerilog.scala`. No other file in
+  `src/hw/` should import from the `uart` package — keep the
+  surface area to the demo top.
+- The `Makefile`'s `HW_SRCS` glob explicitly extends to
+  `../Uart/src/hw/*.scala` so an upstream Uart edit
+  invalidates `gen/I2cControllerDemo.v`. Don't drop that glob.
+- `UartController`'s register layout / address map is treated
+  as a stable contract; if it changes upstream, the demo's
+  ROM-CPU script in `I2cControllerDemo.scala` has to be
+  re-synchronised in the same commit. Keep an eye on
+  `Uart/src/hw/UartController.scala`'s "Address map" doc-block
+  during reviews.
+
+This dep is sanctioned by the top-level `AGENTS.md`
+("Cross-project dependencies") and `Uart/AGENTS.md` ("TX reuse
+in downstream projects"). Adding any *other* cross-project sbt
+dep (e.g. depending on `Pwm` or a future `Spi` project)
+requires updating those two files first.
+
 ## Pin assignments
 
 See `icebreaker.pcf`:

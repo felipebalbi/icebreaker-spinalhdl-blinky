@@ -10,7 +10,14 @@ val spinalIdslPlugin = compilerPlugin(
   "com.github.spinalhdl" %% "spinalhdl-idsl-plugin" % spinalVersion
 )
 
-lazy val projectname = (project in file("."))
+// Cross-project debug-IO dep: pull in the Uart project so this
+// build (and any future debug-stream consumer in the I2c crate)
+// can instantiate `uart.UartController` directly. See top-level
+// AGENTS.md ("Cross-project sbt dependencies are permitted only
+// for shared debug/IO IPs") and I2c/AGENTS.md ("Cross-project deps").
+lazy val uart = ProjectRef(file("../Uart"), "uart")
+
+lazy val i2c = (project in file("."))
   .settings(
     name := "i2c",
     Compile / scalaSource := baseDirectory.value / "src",
@@ -21,5 +28,6 @@ lazy val projectname = (project in file("."))
       "com.github.spinalhdl" %% "spinalhdl-sim" % spinalVersion
     )
   )
+  .dependsOn(uart)
 
 fork := true

@@ -593,7 +593,10 @@ case class I2cController(
   // OR(ISR & IER) gated by the master enable. Mirrors UartController.
   // isrStretchTimeout is tied to RO 0 today (reserved for future
   // stretch-timeout support); the term is folded in for layout
-  // symmetry with ISR/IER and collapses away at synth.
+  // symmetry with ISR/IER and collapses away at synth. The explicit
+  // drive is required: SpinalSim elaboration is permissive about
+  // undriven RO fields, but `generateVerilog` rightly errors out.
+  isrStretchTimeout := False
   val irqRaw =
     (isrAddrNack & ierAddrNack) |
       (isrDataNack & ierDataNack) |

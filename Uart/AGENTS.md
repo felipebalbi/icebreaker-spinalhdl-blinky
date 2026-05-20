@@ -51,19 +51,27 @@ path. Don't add a third FF or a glitch filter without a documented
 reason; the receiver oversamples 16× and the FSM majority-votes
 mid-bit, which already absorbs single-cycle line glitches.
 
-## TX reuse in the I2c project
+## TX reuse in downstream projects
 
-When `I2c/Step 7` (controller bring-up demo) needs UART output for
-byte dumps, **copy** the minimum TX path
-(`BaudGenerator`, `TxShiftReg`, `TxFsm`, `UartTx`) into the `i2c`
-package as `LocalUartTx*` (or similar). **Do not** introduce a
-cross-project sbt dependency from `i2c` to `uart`.
+`UartController` is the repo's canonical debug-output IP. When a
+downstream project (currently `I2c`) needs a UART debug stream,
+it pulls this project in as an sbt sibling via
+`ProjectRef(file("../Uart"), "uart")` and instantiates
+`uart.UartController` directly. **Do not** copy
+`BaudGenerator` / `UartTx` into the downstream project just for
+debug output — that path was the old convention and has been
+retired.
 
-Mark the copies with a header comment:
-```scala
-// Copied from the Uart project for self-contained I2c builds.
-// If Uart's BaudGenerator changes meaningfully, sync forward.
-```
+This dep is one-directional: this project does *not* depend on
+any downstream project, so editing `Uart/src/hw/` cannot break
+its own elaboration. Downstream projects extend their `HW_SRCS`
+glob to include `../Uart/src/hw/*.scala` so an edit here
+invalidates their generated Verilog.
+
+If you change a register layout, address map, or `UartConfig`
+default, treat it as a breaking API change for downstream:
+update each consumer in the same commit. (Today only `I2c`
+depends on this project, so the blast radius is small.)
 
 ## What's reasonable to extend
 
