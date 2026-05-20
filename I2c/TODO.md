@@ -1011,6 +1011,25 @@ works. `HW_SRCS` extended to include `../Uart/src/hw/*.scala`.
    shows both bytes and the fractional digit changes with
    ambient temperature.
 
+   *Canonical post-fix capture* (100 kHz, one read frame, edited
+   for width):
+   ```
+   start
+   address  0x48  W  ack=true
+   data           0x00  ack=true     ; pointer write
+   start                              ; repeated start
+   address  0x48  R  ack=true
+   data           0x17  ack=true     ; byteHi, master ACKs to continue
+   data           0x90  ack=false    ; byteLo, master NACKs to terminate
+   stop
+   ```
+   *Worked-example decode*: `byteHi=0x17`, `byteLo=0x90` →
+   `raw16 = 0x1790` → `bits[15:4] = 0x179 = 377` → `× 0.0625 °C
+   ≈ 23.5625 °C`. The formatter emits `+23.5\r\n` (the
+   fractional path takes `fracBits = 0x9`, `(0x9 * 10) >> 4 = 5`).
+   1 Hz cadence is observable in the timestamp deltas (0.187 s,
+   1.187 s, 2.187 s, 3.187 s, …).
+
 2. **SCL duty cycle ≈ 36 % HIGH.** Worth flagging because the
    first instinct on seeing this is "broken clock", but it's
    correct: the I²C spec asymmetry is intentional (longer LOW
