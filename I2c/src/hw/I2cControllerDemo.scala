@@ -288,7 +288,7 @@ case class I2cControllerDemo(
   private val CMD_READ_DATA = 3
   private val CMD_REP_START = 4
   private val CMD_STOP = 5
-  private val CMD_ACK_OUT = 1 << 3 // master ACK after the byte
+  private val CMD_ACK_OUT = 1 << 3 // master ACK polarity for ReadData: 0=ACK & continue, 1=NACK before Stop (matches I2cController CMD doc)
 
   // UART base = 0x100.
   private val UART_CTRL = 0x104
@@ -462,9 +462,10 @@ case class I2cControllerDemo(
     sCmdRepStart.whenIsActive { issueWrite(I2C_CMD, CMD_REP_START, sPollRepStart) }
     sPollRepStart.whenIsActive { pollCmdBusyClear(sCmdReadHi) }
 
-    // 4) ReadData with master ACK (we're going to read another byte)
+    // 4) ReadData with master ACK (we're going to read another byte).
+    //    Per I2cController CMD doc: cmdAckOut=0 means "ACK and continue".
     sCmdReadHi.whenIsActive {
-      issueWrite(I2C_CMD, CMD_READ_DATA | CMD_ACK_OUT, sPollReadHi)
+      issueWrite(I2C_CMD, CMD_READ_DATA, sPollReadHi)
     }
     sPollReadHi.whenIsActive { pollCmdBusyClear(sPopHi) }
     sPopHi.whenIsActive {
@@ -472,8 +473,8 @@ case class I2cControllerDemo(
       when(req.done) { byteHi := req.rdata(7 downto 0) }
     }
 
-    // 5) ReadData with master NACK (last byte)
-    sCmdReadLo.whenIsActive { issueWrite(I2C_CMD, CMD_READ_DATA, sPollReadLo) }
+    // 5) ReadData with master NACK (last byte). cmdAckOut=1 = "NACK before STOP".
+    sCmdReadLo.whenIsActive { issueWrite(I2C_CMD, CMD_READ_DATA | CMD_ACK_OUT, sPollReadLo) }
     sPollReadLo.whenIsActive { pollCmdBusyClear(sPopLo) }
     sPopLo.whenIsActive {
       issueRead(I2C_RXDATA, sCmdStop)

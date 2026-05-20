@@ -4,17 +4,16 @@ A from-scratch I²C **controller** and **target** in SpinalHDL, targeting
 the iCEbreaker. Both halves are built in the same project so they can
 be simulated against each other before either ever touches a real bus.
 
-Status: **Phase 1 simulated; demo scaffolded, hardware bring-up
-pending.** `I2cController` (the APB3-fronted register-mapped
-wrapper) and its sim shipped in Step 6, and Step 7's bring-up
-demo (`I2cControllerDemo`) is now scaffolded — it instantiates
-`I2cController` and `uart.UartController` (pulled in via a
-cross-project sbt `ProjectRef` to `../Uart`) behind a tiny
-internal Apb3 fabric, walks the canonical TMP108 read sequence,
-decodes the 12-bit signed result, and streams `±NN.N\r\n` over
-USB-UART once per second. Real-silicon bring-up (`make all &&
-make flash`, then `picocom` to see the readings) is the open
-Phase-1 gate; see `TODO.md` Step 7 for the checklist.
+Status: **Phase 1 complete — validated on real hardware.** `I2cController`
+(the APB3-fronted register-mapped wrapper) and its sim shipped in Step 6,
+and `I2cControllerDemo` reads a TMP108 temperature sensor on PMOD1A I²C
+and streams `±NN.N\r\n` over USB-UART once per second on the iCEbreaker.
+Bring-up validated on real hardware at both Standard (100 kHz) and Fast
+(400 kHz) modes; LA capture confirms the full TMP108 read sequence
+(`Start → 0x48/W → 0x00 → RepStart → 0x48/R → hi[ACK] → lo[NACK] → Stop`).
+SCL duty cycle sits around 36 % HIGH — *expected*, since the I²C spec's
+`tLOW > tHIGH` floors push `BusTiming` toward a low-heavy quarter-period
+schedule.
 **Caveat:** the PRESCALE register is shipped *decorative* — it stores
 and reads back, but `I2cBitController` consumes
 `cfg.quarterPeriodCycles` at elaboration only, so writes do not retune

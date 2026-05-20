@@ -41,6 +41,7 @@ survives independently of the source.
 - [x] `I2cControllerDocs` (`make docs` `runMain`: HTML / C header / JSON / RALF / SystemRDL)
 - [x] `I2cControllerDemo` (TMP108 → APB3 fabric → `uart.UartController` → `+NN.N\r\n` over USB-UART; pulls `Uart` in via `ProjectRef`, replaces the "copy TX" plan)
 - [x] `I2cControllerDemoVerilog` (`make gen-demo` / default `make all` `runMain` entrypoint)
+- [x] **Phase 1 hardware bring-up validated** on iCEbreaker + TMP108 at 100 kHz and 400 kHz; LA trace confirms full TMP108 read sequence; `picocom` shows `±NN.N\r\n` matching ambient. 🎉
 
 ---
 
@@ -965,13 +966,61 @@ works. `HW_SRCS` extended to include `../Uart/src/hw/*.scala`.
 
 **Sim:** none — by design. Hardware bring-up is the Phase-1 gate.
 
-**Hardware bring-up checklist (open):**
-- [ ] Bitstream builds clean.
-- [ ] On scope/LA: SCL toggles at 100 kHz.
-- [ ] Address phase ACKs at 0x48 (TMP108).
-- [ ] `picocom -b 115200 /dev/ttyUSB1` shows `+NN.N\r\n` once
+**Hardware bring-up checklist:**
+- [x] Bitstream builds clean.
+- [x] On scope/LA: SCL toggles at 100 kHz **and** 400 kHz (validated
+      both bus speeds; all I²C-spec timings respected). Duty cycle
+      sits around 36 % HIGH / 64 % LOW — *expected*, not a bug:
+      I²C-spec floors are asymmetric (`tLOW > tHIGH` in every speed
+      grade), and `BusTiming.scala` reconciles them by quartering
+      each bit period and biasing the rounding into the LOW
+      half-bit. See `Phase 0 → BusTiming` block above for the
+      `quarterPeriodCycles` derivation.
+- [x] Address phase ACKs at 0x48 (TMP108).
+- [x] LA decode confirms full TMP108 sequence: `Start →
+      0x48/W ACK → 0x00 ACK → RepStart → 0x48/R ACK → byteHi ACK →
+      byteLo NACK → Stop`. (Bring-up first run captured only
+      *one* read byte before Stop — see "Bring-up notes" below for
+      the `cmdAckOut`-polarity bug we caught from the LA trace
+      and fixed.)
+- [x] `picocom -b 115200 /dev/ttyUSB1` shows `±NN.N\r\n` once
       per second matching room temperature.
-- [ ] 🎉 Phase 1 closed.
+- [x] 🎉 Phase 1 closed.
+
+**Bring-up notes:**
+
+1. **`cmdAckOut` polarity bug — caught from the LA trace.** The
+   first hardware run produced visually-plausible output
+   (`+25.0\r\n`) but the LA trace showed only *one* read data byte
+   followed by an immediate Stop. Root cause: the demo had the
+   `cmdAckOut` polarity inverted — `sCmdReadHi` was issuing
+   `CMD_READ_DATA | CMD_ACK_OUT` (=NACK after byte) and
+   `sCmdReadLo` was issuing plain `CMD_READ_DATA` (=ACK & continue),
+   the exact opposite of the controller's CMD register
+   semantics ("0 = ACK and continue, 1 = NACK before STOP", per
+   `I2cController.scala`'s `cmdAckOut` field doc). On the bus
+   that meant the master NACKed after byte 1, the byte
+   controller's wedge-on-NAK regime silently dropped the
+   queued second ReadData, the FSM saw `cmd_busy` clear and
+   moved straight to `Stop`. The temperature output looked sane
+   only because `byteLo` stayed at its `Reg(...) init(0)` value:
+   `byteHi=0x19`, `byteLo=0x00` decodes to exactly `+25.0`. Fix
+   was a one-line swap in `sCmdReadHi`/`sCmdReadLo`; the
+   `CMD_ACK_OUT` constant comment was also reworded to match
+   the controller-side polarity. After the fix the LA trace
+   shows both bytes and the fractional digit changes with
+   ambient temperature.
+
+2. **SCL duty cycle ≈ 36 % HIGH.** Worth flagging because the
+   first instinct on seeing this is "broken clock", but it's
+   correct: the I²C spec asymmetry is intentional (longer LOW
+   gives the target more time to clock-stretch and to update
+   SDA on the falling edge), and reproducing it on-chip at
+   integer cycle counts forces a bias. If a future variant
+   wants closer-to-50 %, the lever is `BusTiming.scala` —
+   replace the single `quarterPeriodCycles` count with
+   independent `tLow`/`tHigh` counts, then split the bit-FSM's
+   quarter-tick stride.
 
 ---
 
