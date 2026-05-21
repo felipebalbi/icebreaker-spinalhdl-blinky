@@ -1,0 +1,27 @@
+# 12 MHz clock
+set_io io_clk        35
+set_frequency io_clk 12
+
+# Active-low reset (iCEbreaker user button "uButton" / USR_BTN /
+# BTN_N on the schematic, pin 10). Pulled high on the board,
+# shorted to ground when pressed. Same convention as the Uart and
+# I2c projects so the muscle-memory carries over: hold uButton to
+# pin the design in reset.
+set_io io_reset      10
+
+# On-board LEDs (active-high through SB_IO; the iCEbreaker uses the
+# `*_N` net naming on the schematic but the pads themselves are
+# driven directly by user logic, so writing 1 lights the LED).
+#
+#   io_led_blink -> LEDR_N (red)
+#   io_led_edge  -> LEDG_N (green)
+set_io io_led_blink  11
+set_io io_led_edge   37
+
+# GPIO demo button: snap-off section button BTN1 (pin 18). Active-LOW
+# with an external pull-up; shorts to ground when pressed. Routed
+# into the controller as `gpio[2]` and consumed by the Step-7 APB
+# master through the controller's IN / ISR / IER paths. Use BTN2
+# (pin 19) or BTN3 (pin 20) instead by editing this file -- the
+# rest of the design is pin-agnostic.
+set_io io_btn        18
