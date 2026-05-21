@@ -48,18 +48,54 @@ stretch goals (atomic SET / CLR / TOG, alternate-function muxing).
 0x00 REVISION       RO   IP version (major.minor.patch), sourced from Makefile
 0x04 CTRL           RW   master enable + irq enable
 0x08 STATUS         RO   live status bits (TBD: e.g. any-IRQ-pending mirror)
-0x0C ISR            W1C  per-pin edge events; write 1 to clear
-0x10 IER            RW   per-pin interrupt enable; matches ISR
-0x14 DIR            RW   per-pin direction (0 = input, 1 = output)
-0x18 IN             RO   per-pin pad sample (post-synchroniser)
-0x1C OUT            RW   per-pin output value (driven when DIR = 1)
-0x20 OPEN_DRAIN     RW   per-pin open-drain mode (1 = drive low only)
-0x24 PULL           RW   per-pin pull enable
-0x28 PULL_TYPE      RW   per-pin pull polarity (0 = down, 1 = up)
-0x2C INPUT_ENABLE   RW   per-pin input-buffer enable
-0x30 EDGE_RISE      RW   per-pin "fire ISR on rising edge"
-0x34 EDGE_FALL      RW   per-pin "fire ISR on falling edge"
-0x38 CFG_INFO       RO   build-time parameters (numPins, ...)
+
+0x10 ISR            W1C  per-pin edge events; write 1 to clear
+0x14 IER            RW   per-pin interrupt enable; matches ISR
+
+0x20 DIR            RW   per-pin direction (0 = input, 1 = output)
+0x24 DIR_SET        WO   set
+0x28 DIR_CLR        WO   clear
+0x2C DIR_TOG        RO   toggle
+0x30 OUT            RW   per-pin output value (driven when DIR = 1)
+0x34 OUT_SET        WO   set
+0x38 OUT_CLR        WO   clear
+0x3C OUT_TOG        WO   toggle
+0x30 IN             RO   per-pin pad sample (post-synchroniser)
+
+0x40 DRV_MODE       RW   per-pin drive mode (0 = push-pull, 1 = open-drain)
+0x44 DRV_MODE_SET   WO   set
+0x48 DRV_MODE_CLR   WO   clear
+0x4C DRV_MODE_TOG   WO   toggle
+0x50 PULL           RW   per-pin pull enable
+0x54 PULL_SET       WO   set
+0x58 PULL_CLR       WO   clear
+0x5C PULL_TOG       WO   toggle
+0x60 PULL_TYPE      RW   per-pin pull polarity (0 = down, 1 = up)
+0x64 PULL_TYPE_SET  RW   set
+0x68 PULL_TYPE_CLR  RW   clear
+0x6C PULL_TYPE_TOG  RW   toggle
+0x70 INPUT_EN       RW   per-pin input-buffer enable
+0x74 INPUT_EN_SET   WO   set
+0x78 INPUT_EN_CLR   WO   clear
+0x7C INPUT_EN_TOG   WO   toggle
+0x80 LEVEL_HIGH     RW   per-pin "fire ISR on high level"
+0x84 LEVEL_HIGH_SET WO   set
+0x88 LEVEL_HIGH_CLR WO   clear
+0x8C LEVEL_HIGH_TOG WO   toggle
+0x90 LEVEL_LOW      RW   per-pin "fire ISR on low level"
+0x94 LEVEL_LOW_SET  WO   set
+0x98 LEVEL_LOW_CLR  WO   clear
+0x9C LEVEL_LOW_TOG  WO   toggle
+0xA0 EDGE_RISE      RW   per-pin "fire ISR on rising edge"
+0xA4 EDGE_RISE_SET  WO   set
+0xA8 EDGE_RISE_CLR  WO   clear
+0xAC EDGE_RISE_TOG  WO   toggle
+0xB0 EDGE_FALL      RW   per-pin "fire ISR on falling edge"
+0xB4 EDGE_FALL_SET  WO   set
+0xB8 EDGE_FALL_CLR  WO   clear
+0xBC EDGE_FALL_TOG  WO   toggle
+
+0xFC CFG_INFO       RO   build-time parameters (numPins, ...)
 ```
 
 Every per-pin register (everything except REVISION / CTRL / STATUS /
